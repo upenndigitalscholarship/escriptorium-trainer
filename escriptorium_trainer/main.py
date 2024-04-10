@@ -144,23 +144,26 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
         secrets["ESCRIPTORIUM_PASSWORD"],
     )
     # get list of projects
-    projects = E.get_projects()
-    project_names = [p.name for p in projects.results]
-    for i, name in enumerate(project_names):
-        print(
-            f"[bold green_yellow]{i}[/bold green_yellow] [bold white]{name}[/bold white]"
-        )
-    project_name = typer.prompt("Please select a project for training")
-    # if the user enters a number, use that to select the document
-    if project_name.isdigit():
-        project_pk = projects.results[int(project_name)].id
-        project_slug = projects.results[int(project_name)].slug
-        E.set_connector_project_by_pk(project_pk)
-        print(
-            f"[bold green_yellow] 🏋️ Training with {E.project_name}...[/bold green_yellow]"
-        )
-    else:
-        project_slug = None
+    # not using E.get_projects() because it fails
+    projects = requests.get(f"https://escriptorium.pennds.org/api/projects", headers=E.http.headers )
+    if projects.status_code == 200:
+        projects = projects.json()
+        project_names = [p['name'] for p in projects['results'] if p['owner'] == secrets["ESCRIPTORIUM_USERNAME"]]
+        for i, name in enumerate(project_names):
+            print(
+                f"[bold green_yellow]{i}[/bold green_yellow] [bold white]{name}[/bold white]"
+            )
+        project_name = typer.prompt("Please select a project for training")
+        # if the user enters a number, use that to select the document
+        if project_name.isdigit():
+            project_pk = projects['results'][int(project_name)]['id']
+            project_slug = projects['results'][int(project_name)]['slug']
+            E.set_connector_project_by_pk(project_pk)
+            print(
+                f"[bold green_yellow] 🏋️ Training with {E.project_name}...[/bold green_yellow]"
+            )
+        else:
+            project_slug = None
 
     # create folder for training data
     training_data_path = Path("training_data")
