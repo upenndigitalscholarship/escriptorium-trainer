@@ -74,6 +74,9 @@ def train(training_data, model_dir='models/HTR-Araucania_XIX.mlmodel', models_pa
     reorder = 'R' # for RTL languages else 'L'
     if torch.cuda.is_available():
         device = 'cuda:0'
+    # If running on Mac with silicon chip, use Metal Performance Shaders
+    elif torch.backends.mps.is_available():
+        device = "mps"
     else:
         device = 'cpu'
     accelerator, device = to_ptl_device(device)
