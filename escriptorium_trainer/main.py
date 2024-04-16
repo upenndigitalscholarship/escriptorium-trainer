@@ -83,7 +83,8 @@ def make_training_data(E: EscriptoriumConnector, documents:list, transcription_p
         return training_data
 
 
-def train(training_data, model_dir='escriptorium_trainer/models/HTR-Araucania_XIX.mlmodel', models_path:Path=Path('models'), model_name:str='new_model'):
+def train(training_data, model_dir='models/HTR-Araucania_XIX.mlmodel', 
+models_path:Path=Path('models'), model_name:str='new_model'):
     # helper function to train a new model
     # model_dir = path to existing model for fine-tuning
     # based on https://gitlab.com/scripta/escriptorium/-/blob/develop/app/apps/core/tasks.py?ref_type=heads#L418
