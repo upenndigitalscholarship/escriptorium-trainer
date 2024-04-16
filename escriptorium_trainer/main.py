@@ -28,40 +28,62 @@ def make_training_data(E: EscriptoriumConnector, documents:list, transcription_p
     #                       'boundary': lt['mask']} for lt in ground_truth[partition:]]
 
     # evaluation_data = [{'image': os.path.join(settings.MEDIA_ROOT, lt['image']),
-    training_data = []
+    if (training_data_path / "training_data.json").exists():
+        training_data = srsly.read_json(training_data_path / "training_data.json")
+        return training_data
+    else:
+        training_data = []
 
-    for document in documents:
-        parts = E.get_document_parts(document.pk)
-        for part in track(parts.results, description=f"Downloading {document.name}..."):
-            if not (training_data_path / f"{part.filename}").exists():
-                img_binary = E.get_document_part_image(document.pk, part.pk)
-                img = Image.open(io.BytesIO(img_binary))
-                # save image
-                img.save(str(training_data_path / f"{part.filename}"))
-            image_path = str(training_data_path / f"{part.filename}")
-            # get lines
-            lines = E.get_document_part_lines(document.pk, part.pk) 
-            #get baseline and mask
-            for line in lines.results: 
-                baseline = line.baseline
-                boundary = line.mask
-                
-                # get text transcription
-                part_line_transcription = E.get_document_part_line_transcription_by_transcription(document.pk, part.pk,line.pk,transcription_pk) 
-                if part_line_transcription:
-                    #ignore if content is None or empty
-                    if part_line_transcription.content is None or part_line_transcription.content == "":
-                        continue
-                    else:
-                        text = part_line_transcription.content
-                        training_data.append({'image': image_path,
-                                            'text': text,
-                                            'baseline': baseline,
-                                            'boundary': boundary})
-    return training_data
+        for document in documents:
+            parts = E.get_document_parts(document.pk)
+            for part in track(parts.results, description=f"Downloading {document.name}..."):
+                # Skip downloading images without text transcription 
+                # TODO Evaluate this decision for cases where no text is the correct answer
+                has_text = False
+            
+                image_path = str(training_data_path / f"{part.filename}")
+                # get lines
+                lines = E.get_document_part_lines(document.pk, part.pk) 
+                #get baseline and mask
+                for line in lines.results: 
+                    baseline = line.baseline
+                    boundary = line.mask
+                    
+                    # get text transcription
+                    part_line_transcription = E.get_document_part_line_transcription_by_transcription(document.pk, part.pk,line.pk,transcription_pk) 
+                    if part_line_transcription:
+                        #ignore if content is None or empty
+                        if part_line_transcription.content is None or part_line_transcription.content == "":
+                            continue
+                        else:
+                            has_text = True
+                            text = part_line_transcription.content
+                            training_data.append({'image': image_path,
+                                                'text': text,
+                                                'baseline': baseline,
+                                                'boundary': boundary})
+                            
+                if has_text and not (training_data_path / f"{part.filename}").exists():
+                    img_binary = E.get_document_part_image(document.pk, part.pk)
+                    img = Image.open(io.BytesIO(img_binary))
+                    # save image
+                    img.save(str(training_data_path / f"{part.filename}"))
+                    
+                    # save transcription
+                    transcription = E.download_part_alto_transcription(
+                        document.pk, part.pk, transcription_pk
+                    )
+                    with ZipFile(io.BytesIO(transcription)) as z:
+                        with z.open(z.namelist()[0]) as f:
+                            transcription = f.read()
+                            Path(
+                                str(training_data_path / f"{part.filename}.xml")
+                            ).write_bytes(transcription)
+
+        return training_data
 
 
-def train(training_data, model_dir='models/HTR-Araucania_XIX.mlmodel', models_path:Path=Path('models'), model_name:str='new_model'):
+def train(training_data, model_dir='escriptorium_trainer/models/HTR-Araucania_XIX.mlmodel', models_path:Path=Path('models'), model_name:str='new_model'):
     # helper function to train a new model
     # model_dir = path to existing model for fine-tuning
     # based on https://gitlab.com/scripta/escriptorium/-/blob/develop/app/apps/core/tasks.py?ref_type=heads#L418
@@ -148,10 +170,11 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
     )
     # get list of projects
     # not using E.get_projects() because it fails
-    projects = requests.get(f"https://escriptorium.pennds.org/api/projects", headers=E.http.headers )
+    projects = requests.get(f"{secrets['ESCRIPTORIUM_URL']}/api/projects", headers=E.http.headers )
     if projects.status_code == 200:
         projects = projects.json()
-        project_names = [p['name'] for p in projects['results'] if p['owner'] == secrets["ESCRIPTORIUM_USERNAME"]]
+        project_results = projects['results']
+        project_names = [p['name'] for p in project_results]
         for i, name in enumerate(project_names):
             print(
                 f"[bold green_yellow]{i}[/bold green_yellow] [bold white]{name}[/bold white]"
@@ -159,11 +182,11 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
         project_name = typer.prompt("Please select a project for training")
         # if the user enters a number, use that to select the document
         if project_name.isdigit():
-            project_pk = projects['results'][int(project_name)]['id']
-            project_slug = projects['results'][int(project_name)]['slug']
-            E.set_connector_project_by_pk(project_pk)
+            proj_name = project_results[int(project_name)]['name']
+            project_slug = project_results[int(project_name)]['slug']
+           
             print(
-                f"[bold green_yellow] 🏋️ Training with {E.project_name}...[/bold green_yellow]"
+                f"[bold green_yellow] 🏋️ Training with {proj_name}...[/bold green_yellow]"
             )
         else:
             project_slug = None
@@ -184,6 +207,7 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
     # fetch all project images
     all_documents = E.get_documents()
     documents = [doc for doc in all_documents.results if doc.project == project_slug]
+    # TODO if there's a permissions problem, we can filter on project["owner"] and project["shared_with_users"]
     #select transcription text to train on IMPORTANT!
     if documents:
         transcriptions = E.get_document_transcriptions(documents[0].pk)
