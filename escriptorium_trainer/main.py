@@ -190,7 +190,9 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
             )
         else:
             project_slug = None
-
+    else:
+        print("🤔 Could not connect to Escriptorium. Please check your credentials.")
+        return
     # create folder for training data
     training_data_path = Path("training_data")
     if not training_data_path.exists():
