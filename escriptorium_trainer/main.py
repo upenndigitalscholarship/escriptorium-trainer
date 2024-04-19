@@ -3,10 +3,9 @@ from pathlib import Path
 from rich import print
 from rich.progress import Progress, SpinnerColumn, TextColumn, track
 import srsly
-from escriptorium_connector import EscriptoriumConnector
 from PIL import Image
 import getpass
-import requests 
+import httpx
 from kraken.lib import models
 from kraken.lib.default_specs import RECOGNITION_HYPER_PARAMS
 from kraken.lib.train import KrakenTrainer, RecognitionModel
@@ -19,8 +18,42 @@ import io
 
 app = typer.Typer()
 
+def get_documents(client:httpx.Client, url:str) -> list[dict]:
+    documents = client.get(f"{url}/api/documents/")
+    if documents.status_code == 200:
+        documents = documents.json()
+        while documents["next"]:
+            next_url = documents["next"]
+            next_documents = client.get(next_url)
+            if next_documents.status_code == 200:
+                documents["results"].extend(next_documents.json()["results"])
+                documents["next"] = next_documents.json()["next"]
+            else:
+                print(f"Error {next_documents.raise_for_status()}")
+        assert len(documents["results"]) == documents["count"], "Not all documents were fetched"
+        return documents
+    else:
+        print(f"Error {documents.raise_for_status()}")
 
-def make_training_data(E: EscriptoriumConnector, documents:list, transcription_pk:int, training_data_path: Path):
+def get_document_transcriptions(document_pk:int):
+    pass
+
+def get_document_parts(pk:int):
+    pass
+
+def get_document_part_lines(document_pk:int, part_pk:int):
+    pass
+
+def get_document_part_line_transcription_by_transcription(document_pk:int, part_pk:int,line_pk:int,transcription_pk:int):
+    pass
+
+def get_document_part_image(document_pk:int, part_pk:int):
+    pass
+
+def download_part_alto_transcription(document_pk:int, part_pk:int, transcription_pk:int):
+    pass
+
+def make_training_data(documents:list, transcription_pk:int, training_data_path: Path):
     # helper funtion to create training and evaluation data
     # training_data = [{'image': os.path.join(settings.MEDIA_ROOT, lt['image']),
     #                       'text': lt['content'],
@@ -35,7 +68,7 @@ def make_training_data(E: EscriptoriumConnector, documents:list, transcription_p
         training_data = []
 
         for document in documents:
-            parts = E.get_document_parts(document.pk)
+            parts = get_document_parts(document.pk)
             for part in track(parts.results, description=f"Downloading {document.name}..."):
                 # Skip downloading images without text transcription 
                 # TODO Evaluate this decision for cases where no text is the correct answer
@@ -43,14 +76,14 @@ def make_training_data(E: EscriptoriumConnector, documents:list, transcription_p
             
                 image_path = str(training_data_path / f"{part.filename}")
                 # get lines
-                lines = E.get_document_part_lines(document.pk, part.pk) 
+                lines = get_document_part_lines(document.pk, part.pk) 
                 #get baseline and mask
                 for line in lines.results: 
                     baseline = line.baseline
                     boundary = line.mask
                     
                     # get text transcription
-                    part_line_transcription = E.get_document_part_line_transcription_by_transcription(document.pk, part.pk,line.pk,transcription_pk) 
+                    part_line_transcription = get_document_part_line_transcription_by_transcription(document.pk, part.pk,line.pk,transcription_pk) 
                     if part_line_transcription:
                         #ignore if content is None or empty
                         if part_line_transcription.content is None or part_line_transcription.content == "":
@@ -64,13 +97,13 @@ def make_training_data(E: EscriptoriumConnector, documents:list, transcription_p
                                                 'boundary': boundary})
                             
                 if has_text and not (training_data_path / f"{part.filename}").exists():
-                    img_binary = E.get_document_part_image(document.pk, part.pk)
+                    img_binary = get_document_part_image(document.pk, part.pk)
                     img = Image.open(io.BytesIO(img_binary))
                     # save image
                     img.save(str(training_data_path / f"{part.filename}"))
                     
                     # save transcription
-                    transcription = E.download_part_alto_transcription(
+                    transcription = download_part_alto_transcription(
                         document.pk, part.pk, transcription_pk
                     )
                     with ZipFile(io.BytesIO(transcription)) as z:
@@ -154,23 +187,19 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
             input("Please enter your Escriptorium Url: ")
             or "https://escriptorium.pennds.org/"
         )
-        secrets["ESCRIPTORIUM_USERNAME"] = (
-            input("Please enter your Escriptorium Username: ") or "invitado"
-        )
-        secrets["ESCRIPTORIUM_PASSWORD"] = getpass.getpass(
-            "Please enter your Escriptorium Password:"
+        secrets["ESCRIPTORIUM_APIKEY"] = (
+            # https://escriptorium.pennds.org/profile/apikey/
+            input("Please enter your Escriptorium API Key: ") or "invitado"
         )
         srsly.write_json("secrets.json", secrets)
 
-    # connect to escriptorium
-    E = EscriptoriumConnector(
-        secrets["ESCRIPTORIUM_URL"],
-        secrets["ESCRIPTORIUM_USERNAME"],
-        secrets["ESCRIPTORIUM_PASSWORD"],
-    )
+
+    client = httpx.Client()
+    client.headers.update({"Accept": "application/json"})
+    client.headers.update({"Authorization": f"""Token {secrets["ESCRIPTORIUM_APIKEY"]}"""})
     # get list of projects
     # not using E.get_projects() because it fails
-    projects = requests.get(f"{secrets['ESCRIPTORIUM_URL']}/api/projects", headers=E.http.headers )
+    projects = client.get(f"{secrets['ESCRIPTORIUM_URL']}/api/projects/")
     if projects.status_code == 200:
         projects = projects.json()
         project_results = projects['results']
@@ -205,12 +234,12 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
         models_path.mkdir(parents=True,exist_ok=True)
 
     # fetch all project images
-    all_documents = E.get_documents()
+    all_documents = get_documents(client, secrets["ESCRIPTORIUM_URL"])
     documents = [doc for doc in all_documents.results if doc.project == project_slug]
     # TODO if there's a permissions problem, we can filter on project["owner"] and project["shared_with_users"]
     #select transcription text to train on IMPORTANT!
     if documents:
-        transcriptions = E.get_document_transcriptions(documents[0].pk)
+        transcriptions = get_document_transcriptions(documents[0].pk)
         transcription_names = [t.name for t in transcriptions]
         for i, name in enumerate(transcription_names):
             print(
@@ -227,7 +256,7 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
         else:
             print("Please enter a number to select the transcription text to train on")
 
-        training_data = make_training_data(E, documents,transcription_pk, training_data_path)
+        training_data = make_training_data(documents,transcription_pk, training_data_path)
         srsly.write_json(training_data_path / "training_data.json", training_data)
 
 
@@ -240,7 +269,7 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
         # if e_url does not end with a slash, add it
         if e_url[-1] != "/":
             e_url = e_url + "/"
-        models = requests.get(f'{e_url}api/models/', headers=E.http.headers) 
+        models = httpx.get(f'{e_url}api/models/', headers=headers) 
         if models.status_code == 200:
             models = models.json()
             model_names = [m["name"] for m in models["results"]]
@@ -258,7 +287,7 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
                 model_uri = [m["file"] for m in models["results"] if m["name"] == model][0]
                 model_filename = model_uri.split("/")[-1]
                 if not (models_path / model_filename).exists():
-                    model_request = requests.get(model_uri, headers=E.http.headers)
+                    model_request = httpx.get(model_uri, headers=E.http.headers)
                     if model_request.status_code == 200:
                         (models_path / model_filename).write_bytes(model_request.content)
                         
