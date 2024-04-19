@@ -35,10 +35,14 @@ def get_documents(client:httpx.Client, url:str) -> list[dict]:
     else:
         print(f"Error {documents.raise_for_status()}")
 
-def get_document_transcriptions(document_pk:int):
-    pass
 
-def get_document_parts(pk:int):
+def get_document_transcriptions(client:httpx.Client, api_url:str, document_pk:int) -> list[dict]:
+    transcriptions = client.get(f"{api_url}/api/documents/{str(document_pk)}/transcriptions/")
+    if transcriptions.status_code == 200:
+        transcriptions = transcriptions.json()
+        return transcriptions
+
+def get_document_parts(document_pk:int):
     pass
 
 def get_document_part_lines(document_pk:int, part_pk:int):
@@ -195,8 +199,7 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
 
 
     client = httpx.Client()
-    client.headers.update({"Accept": "application/json"})
-    client.headers.update({"Authorization": f"""Token {secrets["ESCRIPTORIUM_APIKEY"]}"""})
+    client.headers.update({"Accept": "application/json","Authorization": f"""Token {secrets["ESCRIPTORIUM_APIKEY"]}"""})
     # get list of projects
     # not using E.get_projects() because it fails
     projects = client.get(f"{secrets['ESCRIPTORIUM_URL']}/api/projects/")
