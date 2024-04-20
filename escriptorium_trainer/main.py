@@ -15,8 +15,35 @@ from datetime import date
 from zipfile import ZipFile
 from io import BytesIO
 import io
+import websocket
+from contextlib import closing
+from websocket import create_connection
+from escriptorium_connector import EscriptoriumConnector
 
 app = typer.Typer()
+
+
+def get_cookies(client:httpx.Client, url:str, username:str, password:str) -> dict:
+            login = client.get(f"""{url}/login/""")
+            if login.status_code == 200:
+                csrftoken = client.cookies.get('csrftoken')
+                client.headers.update({"referer":f"{url}/login"})
+                login = client.post(f"{url}/login/", data={"username": username, "password": password, "csrfmiddlewaretoken": csrftoken})
+                
+                sessionid = client.cookies.get('sessionid')
+                return f'csrftoken={csrftoken}; sessionid={sessionid}'
+                
+            else:
+                print(f"Error {login.raise_for_status()}")
+
+
+def get_document(client:httpx.Client, url:str, document_pk:int) -> dict:
+    document = client.get(f"{url}/api/documents/{str(document_pk)}/")
+    if document.status_code == 200:
+        document = document.json()
+        return document
+    else:
+        print(f"Error {document.raise_for_status()}")
 
 def get_documents(client:httpx.Client, url:str) -> list[dict]:
     documents = client.get(f"{url}/api/documents/")
@@ -42,20 +69,91 @@ def get_document_transcriptions(client:httpx.Client, api_url:str, document_pk:in
         transcriptions = transcriptions.json()
         return transcriptions
 
-def get_document_parts(document_pk:int):
-    pass
+def get_document_part(client:httpx.Client, api_url:str, document_pk:int, part_pk:int):
+    part = client.get(f"{api_url}/api/documents/{str(document_pk)}/parts/{str(part_pk)}/")
+    if part.status_code == 200:
+        part = part.json()
+        return part
 
-def get_document_part_lines(document_pk:int, part_pk:int):
-    pass
+def get_document_parts(client:httpx.Client, api_url:str, document_pk:int):
+    parts = client.get(f"{api_url}/api/documents/{str(document_pk)}/parts/")
+    if parts.status_code == 200:
+        parts = parts.json()
+        while parts["next"]:
+            next_url = parts["next"]
+            next_documents = client.get(next_url)
+            if next_documents.status_code == 200:
+                parts["results"].extend(next_documents.json()["results"])
+                parts["next"] = next_documents.json()["next"]
+            else:
+                print(f"Error {next_documents.raise_for_status()}")
+        assert len(parts["results"]) == parts["count"], "Not all parts were fetched"
+        return parts
 
-def get_document_part_line_transcription_by_transcription(document_pk:int, part_pk:int,line_pk:int,transcription_pk:int):
-    pass
+def get_document_part_line(client:httpx.Client, api_url:str, document_pk:int, part_pk:int,line_pk:int):
+    part_line = client.get(f"{api_url}/api/documents/{str(document_pk)}/parts/{str(part_pk)}/lines/{str(line_pk)}/")
+    if part_line.status_code == 200:
+        part_line = part_line.json()
+        return part_line
+    
+def get_document_part_lines(client:httpx.Client, api_url:str,document_pk:int, part_pk:int):
+    part_lines = client.get(f"{api_url}/api/documents/{str(document_pk)}/parts/{str(part_pk)}/lines/")
+    if part_lines.status_code == 200:
+        part_lines = part_lines.json()
+        while part_lines["next"]:
+            next_url = part_lines["next"]
+            next_documents = client.get(next_url)
+            if next_documents.status_code == 200:
+                part_lines["results"].extend(next_documents.json()["results"])
+                part_lines["next"] = next_documents.json()["next"]
+            else:
+                print(f"Error {next_documents.raise_for_status()}")
+        assert len(part_lines["results"]) == part_lines["count"], "Not all parts were fetched"
+        return part_lines
 
-def get_document_part_image(document_pk:int, part_pk:int):
-    pass
+def get_document_region_types(client:httpx.Client, api_url:str, document_pk:int):
+    doc_data = get_document(client, api_url, document_pk)
+    return [x for x in doc_data["valid_block_types"]]
+    
+                                        
+def get_document_part_line_transcription_by_transcription(client:httpx.Client, api_url:str, document_pk:int, part_pk:int,line_pk:int,transcription_pk:int):
+    lines = get_document_part_lines(client, api_url, document_pk, part_pk)
+    transcriptions = []
+    for line in lines["results"]:
+        line = get_document_part_line(client, api_url, document_pk, part_pk, line["pk"])
+        transcriptions.extend([transcription for transcription in line["transcriptions"] if transcription["transcription"] == transcription_pk])
+    return transcriptions
 
-def download_part_alto_transcription(document_pk:int, part_pk:int, transcription_pk:int):
-    pass
+def get_document_part_image(client:httpx.Client, api_url:str, document_pk:int, part_pk:int):
+    part = get_document_part(client, api_url, document_pk, part_pk)
+    uri = part["image"]["uri"]
+    image = client.get(uri)
+    if image.status_code == 200:
+        return image.content
+    else:
+        print(f"Error {image.raise_for_status()}")
+        
+def download_part_alto_transcription(client:httpx.Client, api_url:str, document_pk:int, part_pk:int, transcription_pk:int):
+    #TODO in PROGRESS
+    data = {
+                "task": "export",
+                "transcription": transcription_pk,
+                "file_format": "alto",
+                "region_types": [
+                    x["pk"] for x in get_document_region_types(client, api_url, document_pk)
+                ]
+                + ["Undefined", "Orphan"],
+                "document": document_pk,
+                "parts": part_pk,
+            }
+    cookie = get_cookies(client, api_url, secrets["ESCRIPTORIUM_USERNAME"], secrets["ESCRIPTORIUM_PASSWORD"])
+    with closing(create_connection(f"{api_url.replace('http', 'ws')}ws/notif/", cookie=cookie)) as conn:
+        post_form = client.post(f"{api_url}/documents/{document_pk}/export/", data=data)
+        if post_form.status_code == 200:
+            message = conn.recv()
+            print(message)
+    
+    # /media/users/2/export_doc83_eap1477_mfc_b04_doc12_lozano_alto_202404191353.zip
 
 def make_training_data(documents:list, transcription_pk:int, training_data_path: Path):
     # helper funtion to create training and evaluation data
@@ -187,6 +285,12 @@ def main(clear_secrets: bool = typer.Option(False), fine_tune: bool = typer.Opti
         secrets = srsly.read_json("secrets.json")
     else:
         secrets = {}
+        secrets["ESCRIPTORIUM_USERNAME"] = (
+            input("Please enter your Escriptorium Username: ") or "invitado"
+        )
+        secrets["ESCRIPTORIUM_PASSWORD"] = (
+            getpass.getpass("Please enter your Escriptorium Password: ") or "invitado"
+        )
         secrets["ESCRIPTORIUM_URL"] = (
             input("Please enter your Escriptorium Url: ")
             or "https://escriptorium.pennds.org/"
